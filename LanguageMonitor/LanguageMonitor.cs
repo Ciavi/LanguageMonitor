@@ -142,6 +142,16 @@ namespace PRoConEvents
             _players = new List<CPlayerInfo>();
         }
 
+        public void Enable()
+        {
+            ExecuteCommand("procon.protected.plugins.enable", GetType().Name, "True");
+        }
+
+        public void Disable()
+        {
+            ExecuteCommand("procon.protected.plugins.enable", GetType().Name, "False");
+        }
+
         public void OnPluginLoaded(string strHostName, string strPort, string strPRoConVersion)
         {
             RegisterEvents(GetType().Name, "OnPluginLoaded", "OnPluginEnabled", "OnPluginDisabled",
@@ -161,13 +171,13 @@ namespace PRoConEvents
             catch (DataNotProvidedException m)
             {
                 Console($@"^2{m.Message}");
-                OnPluginDisable();
+                Disable();
             }
             catch (Exception e)
             {
                 Console($@"^2{e.Message}");
                 Console($@"^2{e.StackTrace}");
-                OnPluginDisable();
+                Disable();
             }
         }
 
