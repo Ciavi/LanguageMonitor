@@ -28,6 +28,9 @@ namespace PRoConEvents
         protected string _username;
         protected string _password;
         protected List<string> _regex;
+        protected List<string> _factors;
+        protected List<Rule> _rules;
+        protected enumBoolYesNo _excludeadmins;
 
         protected bool _enabled = false;
 
@@ -44,6 +47,8 @@ namespace PRoConEvents
             List<CPluginVariable> pluginVariables = new List<CPluginVariable>()
             {
                 new CPluginVariable("Monitor|Regular Expressions", typeof(string[]), _regex.ToArray()),
+                new CPluginVariable("Monitor|Factors", typeof(string[]), _factors.ToArray()),
+                new CPluginVariable("Monitor|Exclude Administrators", typeof(enumBoolYesNo), _excludeadmins.ToString()),
                 new CPluginVariable("Database|Hostname", typeof(string), _hostname),
                 new CPluginVariable("Database|Port", typeof(int), _port),
                 new CPluginVariable("Database|Schema", typeof(string), _schema),
@@ -68,8 +73,9 @@ namespace PRoConEvents
                 pluginVariables.Add(new CPluginVariable("Database|Username", typeof(string), _username));
                 pluginVariables.Add(new CPluginVariable("Database|Password", typeof(string), _password));
                 pluginVariables.Add(new CPluginVariable("Monitor|Regular Expressions", typeof(string[]), _regex.ToArray()));
+                pluginVariables.Add(new CPluginVariable("Monitor|Factors", typeof(string[]), _factors.ToArray()));
+                pluginVariables.Add(new CPluginVariable("Monitor|Exclude Administrators", typeof(enumBoolYesNo), _excludeadmins.ToString()));
             }
-
 
             return pluginVariables;
         }
@@ -80,6 +86,14 @@ namespace PRoConEvents
             {
                 case "Regular Expressions":
                     _regex = new List<string>(CPluginVariable.DecodeStringArray(strValue));
+                    BuildRules();
+                    break;
+                case "Factors":
+                    _factors = new List<string>(CPluginVariable.DecodeStringArray(strValue));
+                    BuildRules();
+                    break;
+                case "Exclude Administrators":
+                    _excludeadmins = (strValue == enumBoolYesNo.Yes.ToString() ? enumBoolYesNo.Yes : enumBoolYesNo.No);
                     break;
                 case "Hostname":
                     _hostname = strValue;
@@ -138,15 +152,22 @@ namespace PRoConEvents
             _schema = string.Empty;
             _username = string.Empty;
             _password = string.Empty;
-            _regex = new List<string>();
+            _rules = new List<Rule>();
+            _excludeadmins = enumBoolYesNo.Yes;
             _players = new List<CPlayerInfo>();
         }
 
+        /// <summary>
+        /// Enables the Plugin.
+        /// </summary>
         public void Enable()
         {
             ExecuteCommand("procon.protected.plugins.enable", GetType().Name, "True");
         }
 
+        /// <summary>
+        /// Disables the Plugin.
+        /// </summary>
         public void Disable()
         {
             ExecuteCommand("procon.protected.plugins.enable", GetType().Name, "False");
@@ -194,16 +215,79 @@ namespace PRoConEvents
                 _players = players;
         }
 
+        public override void OnGlobalChat(string speaker, string message)
+        {
+            base.OnGlobalChat(speaker, message);
+        }
+
+        public override void OnTeamChat(string speaker, string message, int teamId)
+        {
+            base.OnTeamChat(speaker, message, teamId);
+        }
+
+        public override void OnSquadChat(string speaker, string message, int teamId, int squadId)
+        {
+            base.OnSquadChat(speaker, message, teamId, squadId);
+        }
+
+        /// <summary>
+        /// Writes to the Plugin Console.
+        /// </summary>
+        /// <param name="message">
+        /// Message to be written.
+        /// </param>
         private void Console(string message)
         {
             ExecuteCommand("procon.protected.pluginconsole.write", "[Language Monitor] " + message);
         }
 
+        /// <summary>
+        /// Builds the rules for the plugin to follow.
+        /// </summary>
+        private void BuildRules()
+        {
+            int diff = Math.Abs(_regex.Count - _factors.Count);
+
+            for (int i = 0; i < diff; i++)
+            {
+                if (_regex.Count > _factors.Count)
+                    _factors.Add(1.00.ToString());
+                else
+                    _regex.Add(string.Empty);
+            }
+
+            _rules.Clear();
+
+            for (int i = 0; i < _factors.Count; i++)
+            {
+                if (!double.TryParse(_factors[i], out double d))
+                    d = 0.00;
+                _rules.Add(new Rule(d, _regex[i]));
+            }
+        }
+
+        /// <summary>
+        /// Returns the player's EA_GUID from current PlayerList or, if the player is still not in it, from the Database.
+        /// </summary>
+        /// <param name="soldierName">
+        /// Player's name.
+        /// </param>
+        /// <returns></returns>
+        private string GetPlayerGUID(string soldierName)
+        {
+            return _players.Find((p) => p.SoldierName == soldierName).GUID ??
+                GetColumnWhere("tbl_playerdata", "EA_GUID", new Dictionary<string, object[]>() {
+                    { "=", new object[] { "SoldierName", soldierName } },
+                }).ToArray()[0].ToString();
+        }
+
         #region Database Management
+        /// <summary>
+        /// Initializes the Database Schema.
+        /// </summary>
         public void InitializeSchema()
         {
             BuildConnectionString();
-            Connect();
 
             if (!TableExists("tbl_language_infractions"))
                 CreateTable("tbl_language_infractions",
@@ -218,10 +302,14 @@ namespace PRoConEvents
                         { "primary", new string[]{ "key(id)" } },
                         { "foreign", new string[]{ "key(ea_guid)", "references", "tbl_playerdata(EA_GUID)" } },
                     });
-
-            Disconnect();
         }
 
+        /// <summary>
+        /// Builds the Connection String for the Database.
+        /// </summary>
+        /// <exception cref="DataNotProvidedException">
+        /// Not all the necessary data was provided in order to build the Connection String.
+        /// </exception>
         private void BuildConnectionString()
         {
             if (_hostname == string.Empty || _schema == string.Empty
@@ -238,17 +326,43 @@ namespace PRoConEvents
             };
         }
 
+        /// <summary>
+        /// Checks if the Table exists on the current Schema.
+        /// </summary>
+        /// <param name="tableName">
+        /// Table name.
+        /// </param>
+        /// <returns>
+        /// Was the table found?
+        /// </returns>
         private bool TableExists(string tableName)
         {
+            Connect();
+
             string query = $@"select count(*) from information_schema.tables where
                 table_schema = '{_schema}' and table_name = '{tableName}';";
 
             MySqlCommand _command = new MySqlCommand(query, _connection);
-            return Convert.ToInt32(_command.ExecuteScalar()) > 0;
+            bool returnValue = Convert.ToInt32(_command.ExecuteScalar()) > 0;
+
+            Disconnect();
+
+            return returnValue;
         }
 
+        /// <summary>
+        /// Creates a Table on the current Schema.
+        /// </summary>
+        /// <param name="tableName">
+        /// Table name.
+        /// </param>
+        /// <param name="columns">
+        /// A collection of Columns, composed by name and attributes.
+        /// </param>
         private void CreateTable(string tableName, Dictionary<string, string[]> columns)
         {
+            Connect();
+
             string query = $@"create table {tableName}(";
 
             foreach (var column in columns)
@@ -263,8 +377,56 @@ namespace PRoConEvents
 
             MySqlCommand _command = new MySqlCommand(query, _connection);
             _command.ExecuteNonQuery();
+
+            Disconnect();
         }
 
+        /// <summary>
+        /// Gets the Column values where the specified condition(s) are valid.
+        /// </summary>
+        /// <param name="tableName">
+        /// Table name.
+        /// </param>
+        /// <param name="columnName">
+        /// Column name.
+        /// </param>
+        /// <param name="whereConditions">
+        /// A collection of Conditions, composed by operator and values.
+        /// </param>
+        /// <returns></returns>
+        private List<object> GetColumnWhere(string tableName, string columnName, Dictionary<string, object[]> whereConditions)
+        {
+            Connect();
+
+            string query = $@"select {columnName} from {tableName} where ";
+
+            foreach (var whereCondition in whereConditions)
+            {
+                string fullCondition = $@"{(string)whereCondition.Value[0]} {whereCondition.Key} {(string)whereCondition.Value[1]} and ";
+                query += fullCondition;
+            }
+
+            query = query.Substring(0, query.Length - 5);
+            query += ";";
+
+            MySqlCommand _command = new MySqlCommand(query, _connection);
+            MySqlDataReader _reader = _command.ExecuteReader();
+
+            List<object> returnValue = new List<object>();
+
+            while (_reader.Read())
+            {
+                returnValue.Add(_reader.GetValue(0));
+            }
+
+            Disconnect();
+
+            return returnValue;
+        }
+
+        /// <summary>
+        /// Connects to the Database.
+        /// </summary>
         private void Connect()
         {
             _connection = new MySqlConnection(_string.GetConnectionString(true));
@@ -272,12 +434,28 @@ namespace PRoConEvents
             _connection.Open();
         }
 
+        /// <summary>
+        /// Disconnects from the Database.
+        /// </summary>
         private void Disconnect()
         {
             if (_connection != null && _connected)
                 _connection.Close();
+            _connected = false;
         }
         #endregion
+    }
+
+    public class Rule
+    {
+        public double Factor { get; set; }
+        public string Regex { get; set; }
+
+        public Rule(double factor, string regex)
+        {
+            Factor = factor;
+            Regex = regex;
+        }
     }
 
     public class DataNotProvidedException : Exception
