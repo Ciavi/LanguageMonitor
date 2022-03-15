@@ -44,40 +44,58 @@ namespace PRoConEvents
         #region VariablesManagement
         public List<CPluginVariable> GetPluginVariables()
         {
-            List<CPluginVariable> pluginVariables = new List<CPluginVariable>()
+            try
             {
-                new CPluginVariable("Monitor|Regular Expressions", typeof(string[]), _regex.ToArray()),
-                new CPluginVariable("Monitor|Factors", typeof(string[]), _factors.ToArray()),
-                new CPluginVariable("Monitor|Exclude Administrators", typeof(enumBoolYesNo), _excludeadmins.ToString()),
-                new CPluginVariable("Database|Hostname", typeof(string), _hostname),
-                new CPluginVariable("Database|Port", typeof(int), _port),
-                new CPluginVariable("Database|Schema", typeof(string), _schema),
-                new CPluginVariable("Database|Username", typeof(string), _username),
-                new CPluginVariable("Database|Password", typeof(string), _password),
-            };
+                List<CPluginVariable> pluginVariables = new List<CPluginVariable>()
+                {
+                    new CPluginVariable("Monitor|Regular Expressions", typeof(string[]), _regex.ToArray()),
+                    new CPluginVariable("Monitor|Factors", typeof(string[]), _factors.ToArray()),
+                    new CPluginVariable("Monitor|Exclude Administrators", typeof(enumBoolYesNo), _excludeadmins),
+                    new CPluginVariable("Database|Hostname", typeof(string), _hostname),
+                    new CPluginVariable("Database|Port", typeof(int), _port),
+                    new CPluginVariable("Database|Schema", typeof(string), _schema),
+                    new CPluginVariable("Database|Username", typeof(string), _username),
+                    new CPluginVariable("Database|Password", typeof(string), _password),
+                };
 
-            return pluginVariables;
+                return pluginVariables;
+            }
+            catch (Exception e)
+            {
+                Console($@"^2{e.Message}");
+                Console($@"^2{e.StackTrace}");
+                return new List<CPluginVariable>();
+            }
         }
 
         public List<CPluginVariable> GetDisplayPluginVariables()
         {
-            List<CPluginVariable> pluginVariables = new List<CPluginVariable>
+            try
             {
-                new CPluginVariable("Database|Hostname", typeof(string), _hostname)
-            };
+                List<CPluginVariable> pluginVariables = new List<CPluginVariable>
+                {
+                    new CPluginVariable("Database|Hostname", typeof(string), _hostname)
+                };
 
-            if (_hostname != string.Empty)
-            {
-                pluginVariables.Add(new CPluginVariable("Database|Port", typeof(int), _port));
-                pluginVariables.Add(new CPluginVariable("Database|Schema", typeof(string), _schema));
-                pluginVariables.Add(new CPluginVariable("Database|Username", typeof(string), _username));
-                pluginVariables.Add(new CPluginVariable("Database|Password", typeof(string), _password));
-                pluginVariables.Add(new CPluginVariable("Monitor|Regular Expressions", typeof(string[]), _regex.ToArray()));
-                pluginVariables.Add(new CPluginVariable("Monitor|Factors", typeof(string[]), _factors.ToArray()));
-                pluginVariables.Add(new CPluginVariable("Monitor|Exclude Administrators", typeof(enumBoolYesNo), _excludeadmins.ToString()));
+                    if (_hostname != string.Empty)
+                    {
+                        pluginVariables.Add(new CPluginVariable("Database|Port", typeof(int), _port));
+                        pluginVariables.Add(new CPluginVariable("Database|Schema", typeof(string), _schema));
+                        pluginVariables.Add(new CPluginVariable("Database|Username", typeof(string), _username));
+                        pluginVariables.Add(new CPluginVariable("Database|Password", typeof(string), _password));
+                        pluginVariables.Add(new CPluginVariable("Monitor|Regular Expressions", typeof(string[]), _regex.ToArray()));
+                        pluginVariables.Add(new CPluginVariable("Monitor|Factors", typeof(string[]), _factors.ToArray()));
+                        pluginVariables.Add(new CPluginVariable("Monitor|Exclude Administrators", typeof(enumBoolYesNo), _excludeadmins));
+                    }
+
+                    return pluginVariables;
             }
-
-            return pluginVariables;
+            catch (Exception e)
+            {
+                Console($@"^2{e.Message}");
+                Console($@"^2{e.StackTrace}");
+                return new List<CPluginVariable>();
+            }
         }
 
         public void SetPluginVariable(string strVariable, string strValue)
@@ -152,6 +170,8 @@ namespace PRoConEvents
             _schema = string.Empty;
             _username = string.Empty;
             _password = string.Empty;
+            _regex = new List<string>();
+            _factors = new List<string>();
             _rules = new List<Rule>();
             _excludeadmins = enumBoolYesNo.Yes;
             _players = new List<CPlayerInfo>();
@@ -217,7 +237,8 @@ namespace PRoConEvents
 
         public override void OnGlobalChat(string speaker, string message)
         {
-            base.OnGlobalChat(speaker, message);
+            if (Evaluate(message))
+                Punish(speaker);
         }
 
         public override void OnTeamChat(string speaker, string message, int teamId)
@@ -238,7 +259,7 @@ namespace PRoConEvents
         /// </param>
         private void Console(string message)
         {
-            ExecuteCommand("procon.protected.pluginconsole.write", "[Language Monitor] " + message);
+            ExecuteCommand("procon.protected.pluginconsole.write", $@"[Language Monitor] {message}");
         }
 
         /// <summary>
@@ -253,7 +274,7 @@ namespace PRoConEvents
                 if (_regex.Count > _factors.Count)
                     _factors.Add(1.00.ToString());
                 else
-                    _regex.Add(string.Empty);
+                    _factors.Remove(_factors[i]);
             }
 
             _rules.Clear();
@@ -276,9 +297,20 @@ namespace PRoConEvents
         private string GetPlayerGUID(string soldierName)
         {
             return _players.Find((p) => p.SoldierName == soldierName).GUID ??
-                GetColumnWhere("tbl_playerdata", "EA_GUID", new Dictionary<string, object[]>() {
+                GetColumnWhere("tbl_playerdata", "EAGUID", new Dictionary<string, object[]>() {
                     { "=", new object[] { "SoldierName", soldierName } },
                 }).ToArray()[0].ToString();
+        }
+
+        private bool Evaluate(string text)
+        {
+            Regex master = new Regex(String.Join("|", _regex.ToArray()));
+            return master.IsMatch(text);
+        }
+
+        private void Punish(string soldierName)
+        {
+            ExecuteCommand("admin.kill", soldierName);
         }
 
         #region Database Management
@@ -300,7 +332,7 @@ namespace PRoConEvents
                         { "forgiven_by", new string[]{ "int" } },
                         { "forgiven_on", new string[]{ "timestamp" } },
                         { "primary", new string[]{ "key(id)" } },
-                        { "foreign", new string[]{ "key(ea_guid)", "references", "tbl_playerdata(EA_GUID)" } },
+                        { "foreign", new string[]{ "key(ea_guid)", "references", "tbl_playerdata(EAGUID)" } },
                     });
         }
 
