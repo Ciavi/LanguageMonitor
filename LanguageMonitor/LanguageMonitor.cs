@@ -25,13 +25,33 @@ namespace PRoConEvents
 {
     public class LanguageMonitor : PRoConPluginAPI, IPRoConPluginInterface
     {
-        protected delegate void Action(object[] parameters);
-        protected Action Forgive;
-        protected Action Punish;
-        protected Action Kill;
-        protected Action Kick;
-        protected Action TempBan;
-        protected Action PermBan;
+        public enum ActionType
+        {
+            Forgive,
+            Punish,
+            Mute,
+            Kill,
+            Kick,
+            Ban,
+        }
+
+        public struct Action
+        {
+            public ActionType Type;
+            public string Issuer;
+            public string Target;
+            public string Message;
+            public long Duration;
+        }
+
+        public struct Rule
+        {
+            public double Factor;
+            public string Regex;
+        }
+
+        protected delegate void FuzzySearchOver(string found);
+        protected event FuzzySearchOver FuzzySearchCompleted;
 
         #region Variables
         protected string _hostname;
@@ -48,7 +68,9 @@ namespace PRoConEvents
         protected enumBoolYesNo _excludeadmins;
 
         protected bool _enabled = false;
-        protected Dictionary<string, Action> _actionqueue;
+        protected long _timespan = 604800;
+        protected Dictionary<uint, Action> _actionSequence;
+        protected List<Tuple<string, Queue<Action>>> _queuedActions;
 
         protected MySqlConnection _connection;
         protected MySqlConnectionStringBuilder _string;
@@ -57,7 +79,7 @@ namespace PRoConEvents
         protected List<CPlayerInfo> _players;
         #endregion
 
-        #region VariablesManagement
+        #region Variables Management
         public List<CPluginVariable> GetPluginVariables()
         {
             try
@@ -157,7 +179,7 @@ namespace PRoConEvents
         }
         #endregion
 
-        #region PluginInfo
+        #region Plugin Info
         public string GetPluginName()
         {
             return "Language Monitor";
@@ -199,8 +221,53 @@ namespace PRoConEvents
             _rules = new List<Rule>();
             _excludeadmins = enumBoolYesNo.Yes;
             _players = new List<CPlayerInfo>();
+
+            _actionSequence = new Dictionary<uint, Action>()
+            {
+                {   
+                    0,
+                    new Action
+                    {
+                        Type = ActionType.Mute,
+                        Duration = 300,
+                    }
+                },
+                {
+                    1,
+                    new Action
+                    {
+                        Type = ActionType.Kill,
+                        Duration = -1,
+                    }
+                },
+                {
+                    5,
+                    new Action
+                    {
+                        Type = ActionType.Kick,
+                        Duration = -1,
+                    }
+                },
+                {
+                    7,
+                    new Action
+                    {
+                        Type = ActionType.Ban,
+                        Duration = 7200,
+                    }
+                },
+                {
+                    8,
+                    new Action
+                    {
+                        Type = ActionType.Ban,
+                        Duration = 14 * 86400,
+                    }
+                },
+            };
         }
 
+        #region PRoCon Methods
         /// <summary>
         /// Enables the Plugin.
         /// </summary>
@@ -216,7 +283,89 @@ namespace PRoConEvents
         {
             ExecuteCommand("procon.protected.plugins.enable", GetType().Name, "False");
         }
+        #endregion
 
+        #region Frostbite Events
+        /// <summary>
+        /// When the players are listed.
+        /// </summary>
+        /// <param name="players">
+        /// The list of players.
+        /// </param>
+        /// <param name="subset">
+        /// The subset of players.
+        /// </param>
+        public override void OnListPlayers(List<CPlayerInfo> players, CPlayerSubset subset)
+        {
+            if (subset.Subset == CPlayerSubset.PlayerSubsetType.All)
+                _players = players;
+        }
+
+        /// <summary>
+        /// When a global chat message is sent.
+        /// </summary>
+        /// <param name="speaker">
+        /// The player's name.
+        /// </param>
+        /// <param name="message">
+        /// The player's message.
+        /// </param>
+        public override void OnGlobalChat(string speaker, string message)
+        {
+            Chat(speaker, message);
+        }
+
+        /// <summary>
+        /// When a team chat message is sent.
+        /// </summary>
+        /// <param name="speaker">
+        /// The player's name.
+        /// </param>
+        /// <param name="message">
+        /// The player's message.
+        /// </param>
+        /// <param name="teamId">
+        /// The player's TeamID
+        /// </param>
+        public override void OnTeamChat(string speaker, string message, int teamId)
+        {
+            Chat(speaker, message);
+        }
+
+        /// <summary>
+        /// When a squad chat message is sent.
+        /// </summary>
+        /// <param name="speaker">
+        /// The player's name.
+        /// </param>
+        /// <param name="message">
+        /// The player's message.
+        /// </param>
+        /// <param name="teamId">
+        /// The player's TeamID.
+        /// </param>
+        /// <param name="squadId">
+        /// The player's SquadID.
+        /// </param>
+        public override void OnSquadChat(string speaker, string message, int teamId, int squadId)
+        {
+            Chat(speaker, message);
+        }
+        #endregion
+
+        #region PRoCon Events
+        /// <summary>
+        /// When the plugin is loaded.
+        /// </summary>
+        /// <param name="strHostName">
+        /// PRoCon host.
+        /// </param>
+        /// <param name="strPort">
+        /// PRoCon port.
+        /// </param>
+        /// <param name="strPRoConVersion">
+        /// PRoCon version.
+        /// </param>
         public void OnPluginLoaded(string strHostName, string strPort, string strPRoConVersion)
         {
             RegisterEvents(GetType().Name, "OnPluginLoaded", "OnPluginEnabled", "OnPluginDisabled",
@@ -224,6 +373,9 @@ namespace PRoConEvents
                 "OnRoundOver", "OnPlayerLeft", "OnGlobalChat", "OnTeamChat", "OnSquadChat");
         }
 
+        /// <summary>
+        /// When the plugin is enabled.
+        /// </summary>
         public void OnPluginEnable()
         {
             _enabled = true;
@@ -247,34 +399,26 @@ namespace PRoConEvents
             }
         }
 
+        /// <summary>
+        /// When the plugin is disabled.
+        /// </summary>
         public void OnPluginDisable()
         {
             _enabled = false;
 
             Console("^1Disabled.");
         }
+        #endregion
 
-        public override void OnListPlayers(List<CPlayerInfo> players, CPlayerSubset subset)
-        {
-            if (subset.Subset == CPlayerSubset.PlayerSubsetType.All)
-                _players = players;
-        }
-
-        public override void OnGlobalChat(string speaker, string message)
-        {
-            Chat(speaker, message);
-        }
-
-        public override void OnTeamChat(string speaker, string message, int teamId)
-        {
-            Chat(speaker, message);
-        }
-
-        public override void OnSquadChat(string speaker, string message, int teamId, int squadId)
-        {
-            Chat(speaker, message);
-        }
-
+        /// <summary>
+        /// Handle chat.
+        /// </summary>
+        /// <param name="speaker">
+        /// The player's name.
+        /// </param>
+        /// <param name="message">
+        /// The player's message.
+        /// </param>
         private void Chat(string speaker, string message)
         {
             if (speaker == "Server")
@@ -327,7 +471,11 @@ namespace PRoConEvents
             {
                 if (!double.TryParse(_factors[i], out double d))
                     d = 0.00;
-                _rules.Add(new Rule(d, _regex[i]));
+
+                _rules.Add(new Rule {
+                    Factor = d,
+                    Regex = _regex[i],
+                });
             }
         }
 
@@ -335,7 +483,7 @@ namespace PRoConEvents
         /// Returns the player's EA_GUID from current PlayerList or, if the player is still not in it, from the Database.
         /// </summary>
         /// <param name="soldierName">
-        /// Player's name.
+        /// The player's name.
         /// </param>
         /// <returns></returns>
         private string GetPlayerGUID(string soldierName)
@@ -346,6 +494,13 @@ namespace PRoConEvents
                 }).ToArray()[0].ToString();
         }
 
+        /// <summary>
+        /// Returns the player's ID from the Database.
+        /// </summary>
+        /// <param name="soldierName">
+        /// The player's name.
+        /// </param>
+        /// <returns></returns>
         private string GetPlayerID(string soldierName)
         {
             return GetColumnWhere("tbl_playerdata", "PlayerID", new Dictionary<string, object[]>() {
@@ -353,6 +508,19 @@ namespace PRoConEvents
             }).ToArray()[0].ToString();
         }
 
+        private Action GetNextAction(string soldierName, string adminName, string reason)
+        {
+
+            return new Action { };
+        }
+
+        /// <summary>
+        /// Evaluate the text and searches for profanities, returning a boolean for status.
+        /// </summary>
+        /// <param name="text">
+        /// The haystack (or text) to be searched.
+        /// </param>
+        /// <returns></returns>
         private bool Evaluate(string text)
         {
             Regex master = new Regex(String.Join("|", _regex.ToArray()));
@@ -360,10 +528,214 @@ namespace PRoConEvents
             return master.Matches(text).Count > 0;
         }
 
+        /// <summary>
+        /// Punishes the player.
+        /// </summary>
+        /// <param name="soldierName">
+        /// The player's name.
+        /// </param>
+        /// <param name="message">
+        /// Message the player's being punished for.
+        /// </param>
         private void PunishPlayer(string soldierName, string message)
         {
             LogToInfractionTable(GetPlayerGUID(soldierName), message);
             ExecuteCommand("procon.protected.send", "admin.killPlayer", soldierName);
+        }
+
+        /// <summary>
+        /// Executes a command.
+        /// </summary>
+        /// <param name="speaker">
+        /// The player's name.
+        /// </param>
+        /// <param name="message">
+        /// The player's message.
+        /// </param>
+        private void LanguageCommand(string speaker, string message)
+        {
+            if (!IsAdmin(speaker)) return;
+
+            message = message.Substring(1).Trim();
+
+            //if (message.Length < 9) return;
+
+            if (message.StartsWith("lforgive"))
+            {
+                message = message.Substring(8).Trim();
+            }
+            //!lpunish <name> <reason>
+            else if (message.StartsWith("lpunish"))
+            {
+                message = message.Substring(7).Trim();
+
+                var command = message.Split(new char[] { ' ' }, 2);
+                string target = command[0];
+                string reason = command[1];
+
+                if (!IsAvailable(target))
+                {
+                    Enqueue(GetNextAction(target, speaker, reason));
+
+                    FuzzyAdKatsUserSearch(target);
+                }
+            }
+            else if (message.StartsWith("yes"))
+            {
+                Execute(Dequeue(speaker));
+            }
+            else if (message.StartsWith("no"))
+            {
+                Dequeue(speaker);
+            }
+        }
+
+        private void Enqueue(Action action)
+        {
+            if (!_queuedActions.Any(t => t.Item1 == action.Issuer))
+            {
+                Queue<Action> actions = new Queue<Action>();
+                actions.Enqueue(action);
+
+                _queuedActions.Add(new Tuple<string, Queue<Action>>(action.Issuer, actions));
+            }
+            else
+                _queuedActions.First(t => t.Item1 == action.Issuer).Item2.Enqueue(action);
+        }
+
+        private Action Dequeue(string adminName)
+        {
+            return _queuedActions.First(t => t.Item1 == adminName).Item2.Dequeue();
+        }
+
+        private void Execute(Action action)
+        {
+
+        }
+
+        #region AdKats
+        /// <summary>
+        /// Remote call to AdKats to request the admin list.
+        /// </summary>
+        private void RefreshAdKatsAdmins()
+        {
+            var requestHashtable = new Hashtable {
+                        {"caller_identity", GetType().Name},
+                        {"response_class", GetType().Name},
+                        {"response_method", "HandleAdKatsAdminResponse"},
+                        {"response_requested", true},
+                        {"command_type", "player_ban_temp"},
+                        {"source_name", GetType().Name},
+                        {"user_subset", "admin"},
+                    };
+
+            ExecuteCommand("procon.protected.plugins.call", "AdKats", "FetchAuthorizedSoldiers", GetType().Name, JSON.JsonEncode(requestHashtable));
+        }
+
+        /// <summary>
+        /// Remote call to AdKats to perform fuzzy search for a player.
+        /// </summary>
+        /// <param name="soldierName">
+        /// The player's name.
+        /// </param>
+        private void FuzzyAdKatsUserSearch(string soldierName)
+        {
+            var requestHashtable = new Hashtable {
+                        {"caller_identity", GetType().Name},
+                        {"response_class", GetType().Name},
+                        {"response_method", "HandleFuzzyAdKatsUserSearch"},
+                        {"response_requested", true},
+                        {"target_name", soldierName},
+                        {"source_name", GetType().Name},
+                        {"user_subset", "all"},
+                    };
+
+            ExecuteCommand("procon.protected.plugins.call", "AdKats", "FetchAuthorizedSoldiers", GetType().Name, JSON.JsonEncode(requestHashtable));
+        }
+
+        /// <summary>
+        /// Handles a response from AdKats for the admin list.
+        /// </summary>
+        /// <param name="response">
+        /// Response.
+        /// </param>
+        public void HandleAdKatsAdminResponse(params string[] response)
+        {
+            if (response.Length != 2)
+                return;
+
+            var values = (Hashtable)JSON.JsonDecode(response[1]);
+
+            if (values["response_type"] as string != "FetchAuthorizedSoldiers")
+                return;
+
+            var val = values["response_value"] as string;
+
+            if (string.IsNullOrEmpty(val))
+                return;
+
+            string[] ads = CPluginVariable.DecodeStringArray(val);
+
+            _admins.Clear();
+            foreach (var admin in ads)
+                _admins.Add(admin);
+        }
+
+        /// <summary>
+        /// Handles a response from AdKats for the fuzzy search.
+        /// </summary>
+        /// <param name="response">
+        /// Response.
+        /// </param>
+        public void HandleFuzzyAdKatsUserSearch(params string[] response)
+        {
+            if (response.Length != 2)
+                return;
+
+            var values = (Hashtable)JSON.JsonDecode(response[1]);
+
+            if (values["response_type"] as string != "FetchAuthorizedSoldiers")
+                return;
+
+            var val = values["response_value"] as string;
+
+            if (string.IsNullOrEmpty(val))
+                return;
+
+            string[] ads = CPluginVariable.DecodeStringArray(val);
+
+            _fuzzy.Clear();
+            foreach (var fuzzy in ads)
+                _fuzzy.Add(fuzzy);
+
+            FuzzySearchCompleted?.Invoke(_fuzzy.FirstOrDefault());
+        }
+        #endregion
+
+        /// <summary>
+        /// Checks if the player is an admin.
+        /// </summary>
+        /// <param name="soldierName">
+        /// The player's name.
+        /// </param>
+        /// <returns></returns>
+        private bool IsAdmin(string soldierName)
+        {
+            bool t = _admins.Contains(soldierName);
+            RefreshAdKatsAdmins();
+            return t;
+        }
+
+        /// <summary>
+        /// Checks if the player is available (i.e. in the server).
+        /// </summary>
+        /// <param name="soldierName">
+        /// The player's name.
+        /// </param>
+        /// <returns></returns>
+        private bool IsAvailable(string soldierName)
+        {
+            return _players.Any(p => p.SoldierName == soldierName);
         }
 
         #region Database Management
@@ -417,11 +789,9 @@ namespace PRoConEvents
         /// Checks if the Table exists on the current Schema.
         /// </summary>
         /// <param name="tableName">
-        /// Table name.
+        /// The table's name.
         /// </param>
-        /// <returns>
-        /// Was the table found?
-        /// </returns>
+        /// <returns></returns>
         private bool TableExists(string tableName)
         {
             Connect();
@@ -441,7 +811,7 @@ namespace PRoConEvents
         /// Creates a Table on the current Schema.
         /// </summary>
         /// <param name="tableName">
-        /// Table name.
+        /// The table's name.
         /// </param>
         /// <param name="columns">
         /// A collection of Columns, composed by name and attributes.
@@ -474,10 +844,10 @@ namespace PRoConEvents
         /// Gets the Column values where the specified condition(s) are valid.
         /// </summary>
         /// <param name="tableName">
-        /// Table name.
+        /// The table's name.
         /// </param>
         /// <param name="columnName">
-        /// Column name.
+        /// The table column's name.
         /// </param>
         /// <param name="whereConditions">
         /// A collection of Conditions, composed by operator and values.
@@ -515,123 +885,20 @@ namespace PRoConEvents
             return returnValue;
         }
 
+        /// <summary>
+        /// Logs an infraction to the Database.
+        /// </summary>
+        /// <param name="guid">
+        /// The player's EA_GUID.
+        /// </param>
+        /// <param name="message">
+        /// The player's message.
+        /// </param>
         private void LogToInfractionTable(string guid, string message)
         {
             Connect();
 
             string query = $@"insert into tbl_language_infractions (ea_guid,message) values ('{guid}','{message}');";
-            MySqlCommand _command = new MySqlCommand(query, _connection);
-            _command.ExecuteNonQuery();
-
-            Disconnect();
-        }
-
-        private void LanguageCommand(string speaker, string message)
-        {
-            if (!IsAdmin(speaker)) return;
-
-            message = message.Substring(1);
-
-            //if (message.Length < 9) return;
-
-            if (message.StartsWith("langforgive"))
-            {
-                int index = 0;
-                if (int.TryParse(message.Replace("langforgive", "").Trim(), out index))
-                    Forgive(index.ToString(), GetPlayerID(speaker));
-            }
-            else if (message.StartsWith("yes"))
-            {
-
-            }
-        }
-
-        private void RefreshAdKatsAdmins()
-        {
-            var requestHashtable = new Hashtable {
-                        {"caller_identity", GetType().Name},
-                        {"response_class", GetType().Name},
-                        {"response_method", "HandleAdKatsAdminResponse"},
-                        {"response_requested", true},
-                        {"command_type", "player_ban_temp"},
-                        {"source_name", GetType().Name},
-                        {"user_subset", "admin"},
-                    };
-
-            ExecuteCommand("procon.protected.plugins.call", "AdKats", "FetchAuthorizedSoldiers", GetType().Name, JSON.JsonEncode(requestHashtable));
-        }
-
-        private void FuzzyAdKatsUserSearch(string soldierName)
-        {
-            var requestHashtable = new Hashtable {
-                        {"caller_identity", GetType().Name},
-                        {"response_class", GetType().Name},
-                        {"response_method", "HandleFuzzyAdKatsUserSearch"},
-                        {"response_requested", true},
-                        {"target_name", soldierName},
-                        {"source_name", GetType().Name},
-                        {"user_subset", "all"},
-                    };
-
-            ExecuteCommand("procon.protected.plugins.call", "AdKats", "FetchAuthorizedSoldiers", GetType().Name, JSON.JsonEncode(requestHashtable));
-        }
-
-        public void HandleAdKatsAdminResponse(params string[] response)
-        {
-            if (response.Length != 2)
-                return;
-
-            var values = (Hashtable)JSON.JsonDecode(response[1]);
-
-            if (values["response_type"] as string != "FetchAuthorizedSoldiers")
-                return;
-
-            var val = values["response_value"] as string;
-
-            if (string.IsNullOrEmpty(val))
-                return;
-
-            string[] ads = CPluginVariable.DecodeStringArray(val);
-
-            _admins.Clear();
-            foreach (var admin in ads)
-                _admins.Add(admin);
-        }
-
-        public void HandleFuzzyAdKatsUserSearch(params string[] response)
-        {
-            if (response.Length != 2)
-                return;
-
-            var values = (Hashtable)JSON.JsonDecode(response[1]);
-
-            if (values["response_type"] as string != "FetchAuthorizedSoldiers")
-                return;
-
-            var val = values["response_value"] as string;
-
-            if (string.IsNullOrEmpty(val))
-                return;
-
-            string[] ads = CPluginVariable.DecodeStringArray(val);
-
-            _fuzzy.Clear();
-            foreach (var fuzzy in ads)
-                _fuzzy.Add(fuzzy);
-        }
-
-        private bool IsAdmin(string soldierName)
-        {
-            bool t = _admins.Contains(soldierName);
-            RefreshAdKatsAdmins();
-            return t;
-        }
-
-        private void Forgive(string id, string adminId)
-        {
-            Connect();
-            Console($@"Forgiving #{id} ({adminId})");
-            string query = $@"update tbl_language_infractions set forgiven = true, forgiven_on = current_timestamp, forgiven_by = {adminId} where id = {id};";
             MySqlCommand _command = new MySqlCommand(query, _connection);
             _command.ExecuteNonQuery();
 
@@ -658,18 +925,6 @@ namespace PRoConEvents
             _connected = false;
         }
         #endregion
-    }
-
-    public class Rule
-    {
-        public double Factor { get; set; }
-        public string Regex { get; set; }
-
-        public Rule(double factor, string regex)
-        {
-            Factor = factor;
-            Regex = regex;
-        }
     }
 
     public class DataNotProvidedException : Exception
