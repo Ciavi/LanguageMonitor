@@ -17,10 +17,22 @@ using MySql.Data;
 using MySql.Data.MySqlClient;
 using MySql.Data.Types;
 
+using Extensions;
+using System.Collections;
+using System.Linq;
+
 namespace PRoConEvents
 {
     public class LanguageMonitor : PRoConPluginAPI, IPRoConPluginInterface
     {
+        protected delegate void Action(object[] parameters);
+        protected Action Forgive;
+        protected Action Punish;
+        protected Action Kill;
+        protected Action Kick;
+        protected Action TempBan;
+        protected Action PermBan;
+
         #region Variables
         protected string _hostname;
         protected int _port;
@@ -29,10 +41,14 @@ namespace PRoConEvents
         protected string _password;
         protected List<string> _regex;
         protected List<string> _factors;
+        protected List<string> _cmdchars;
+        protected List<string> _admins;
+        protected List<string> _fuzzy;
         protected List<Rule> _rules;
         protected enumBoolYesNo _excludeadmins;
 
         protected bool _enabled = false;
+        protected Dictionary<string, Action> _actionqueue;
 
         protected MySqlConnection _connection;
         protected MySqlConnectionStringBuilder _string;
@@ -51,6 +67,7 @@ namespace PRoConEvents
                     new CPluginVariable("Monitor|Regular Expressions", typeof(string[]), _regex.ToArray()),
                     new CPluginVariable("Monitor|Factors", typeof(string[]), _factors.ToArray()),
                     new CPluginVariable("Monitor|Exclude Administrators", typeof(enumBoolYesNo), _excludeadmins),
+                    new CPluginVariable("Monitor|Command Flags", typeof(string[]), _cmdchars.ToArray()),
                     new CPluginVariable("Database|Hostname", typeof(string), _hostname),
                     new CPluginVariable("Database|Port", typeof(int), _port),
                     new CPluginVariable("Database|Schema", typeof(string), _schema),
@@ -86,6 +103,7 @@ namespace PRoConEvents
                         pluginVariables.Add(new CPluginVariable("Monitor|Regular Expressions", typeof(string[]), _regex.ToArray()));
                         pluginVariables.Add(new CPluginVariable("Monitor|Factors", typeof(string[]), _factors.ToArray()));
                         pluginVariables.Add(new CPluginVariable("Monitor|Exclude Administrators", typeof(enumBoolYesNo), _excludeadmins));
+                        pluginVariables.Add(new CPluginVariable("Monitor|Command Flags", typeof(string[]), _cmdchars.ToArray()));
                     }
 
                     return pluginVariables;
@@ -112,6 +130,9 @@ namespace PRoConEvents
                     break;
                 case "Exclude Administrators":
                     _excludeadmins = (strValue == enumBoolYesNo.Yes.ToString() ? enumBoolYesNo.Yes : enumBoolYesNo.No);
+                    break;
+                case "Command Flags":
+                    _cmdchars = new List<string>(CPluginVariable.DecodeStringArray(strValue));
                     break;
                 case "Hostname":
                     _hostname = strValue;
@@ -172,6 +193,9 @@ namespace PRoConEvents
             _password = string.Empty;
             _regex = new List<string>();
             _factors = new List<string>();
+            _cmdchars = new List<string>() { "!", "@", "/" };
+            _admins = new List<string>();
+            _fuzzy = new List<string>();
             _rules = new List<Rule>();
             _excludeadmins = enumBoolYesNo.Yes;
             _players = new List<CPlayerInfo>();
@@ -206,6 +230,7 @@ namespace PRoConEvents
 
             try
             {
+                RefreshAdKatsAdmins();
                 InitializeSchema();
                 Console("^2Enabled.");
             }
@@ -237,18 +262,37 @@ namespace PRoConEvents
 
         public override void OnGlobalChat(string speaker, string message)
         {
-            if (Evaluate(message))
-                Punish(speaker);
+            Chat(speaker, message);
         }
 
         public override void OnTeamChat(string speaker, string message, int teamId)
         {
-            base.OnTeamChat(speaker, message, teamId);
+            Chat(speaker, message);
         }
 
         public override void OnSquadChat(string speaker, string message, int teamId, int squadId)
         {
-            base.OnSquadChat(speaker, message, teamId, squadId);
+            Chat(speaker, message);
+        }
+
+        private void Chat(string speaker, string message)
+        {
+            if (speaker == "Server")
+                return;
+            else
+            {
+                try
+                {
+                    if (message.StartsWithAny(_cmdchars.ToArray()))
+                        LanguageCommand(speaker, message);
+                    else if (Evaluate(message))
+                        PunishPlayer(speaker, message);
+                }
+                catch (Exception ex)
+                {
+                    Console(ex.Message);
+                }
+            }
         }
 
         /// <summary>
@@ -302,15 +346,24 @@ namespace PRoConEvents
                 }).ToArray()[0].ToString();
         }
 
+        private string GetPlayerID(string soldierName)
+        {
+            return GetColumnWhere("tbl_playerdata", "PlayerID", new Dictionary<string, object[]>() {
+                { "=", new object[] { "SoldierName", soldierName } },
+            }).ToArray()[0].ToString();
+        }
+
         private bool Evaluate(string text)
         {
             Regex master = new Regex(String.Join("|", _regex.ToArray()));
-            return master.IsMatch(text);
+            Console((master.Matches(text).Count > 0).ToString());
+            return master.Matches(text).Count > 0;
         }
 
-        private void Punish(string soldierName)
+        private void PunishPlayer(string soldierName, string message)
         {
-            ExecuteCommand("admin.kill", soldierName);
+            LogToInfractionTable(GetPlayerGUID(soldierName), message);
+            ExecuteCommand("procon.protected.send", "admin.killPlayer", soldierName);
         }
 
         #region Database Management
@@ -325,8 +378,10 @@ namespace PRoConEvents
                 CreateTable("tbl_language_infractions",
                     new Dictionary<string, string[]>() { 
                         { "id", new string[]{ "int", "not null", "auto_increment" } },
-                        { "ea_guid", new string[]{ "varchar(35)", "not null" } },
+                        { "ea_guid", new string[]{ "varchar(35)" } },
                         { "message", new string[]{ "text", "not null" } },
+                        { "current", new string[]{ "double", "not null" } },
+                        { "inflicted_by", new string[] { "int", "not null" } },
                         { "inflicted_on", new string[]{ "timestamp", "not null", "default current_timestamp" } },
                         { "forgiven", new string[]{ "bit", "not null", "default false" } },
                         { "forgiven_by", new string[]{ "int" } },
@@ -407,6 +462,8 @@ namespace PRoConEvents
             query = query.Substring(0, query.Length - 1);
             query += ");";
 
+            Console(query);
+
             MySqlCommand _command = new MySqlCommand(query, _connection);
             _command.ExecuteNonQuery();
 
@@ -434,12 +491,14 @@ namespace PRoConEvents
 
             foreach (var whereCondition in whereConditions)
             {
-                string fullCondition = $@"{(string)whereCondition.Value[0]} {whereCondition.Key} {(string)whereCondition.Value[1]} and ";
+                string fullCondition = $@"{(string)whereCondition.Value[0]} {whereCondition.Key} '{(string)whereCondition.Value[1]}' and ";
                 query += fullCondition;
             }
 
             query = query.Substring(0, query.Length - 5);
             query += ";";
+
+            Console(query);
 
             MySqlCommand _command = new MySqlCommand(query, _connection);
             MySqlDataReader _reader = _command.ExecuteReader();
@@ -454,6 +513,129 @@ namespace PRoConEvents
             Disconnect();
 
             return returnValue;
+        }
+
+        private void LogToInfractionTable(string guid, string message)
+        {
+            Connect();
+
+            string query = $@"insert into tbl_language_infractions (ea_guid,message) values ('{guid}','{message}');";
+            MySqlCommand _command = new MySqlCommand(query, _connection);
+            _command.ExecuteNonQuery();
+
+            Disconnect();
+        }
+
+        private void LanguageCommand(string speaker, string message)
+        {
+            if (!IsAdmin(speaker)) return;
+
+            message = message.Substring(1);
+
+            //if (message.Length < 9) return;
+
+            if (message.StartsWith("langforgive"))
+            {
+                int index = 0;
+                if (int.TryParse(message.Replace("langforgive", "").Trim(), out index))
+                    Forgive(index.ToString(), GetPlayerID(speaker));
+            }
+            else if (message.StartsWith("yes"))
+            {
+
+            }
+        }
+
+        private void RefreshAdKatsAdmins()
+        {
+            var requestHashtable = new Hashtable {
+                        {"caller_identity", GetType().Name},
+                        {"response_class", GetType().Name},
+                        {"response_method", "HandleAdKatsAdminResponse"},
+                        {"response_requested", true},
+                        {"command_type", "player_ban_temp"},
+                        {"source_name", GetType().Name},
+                        {"user_subset", "admin"},
+                    };
+
+            ExecuteCommand("procon.protected.plugins.call", "AdKats", "FetchAuthorizedSoldiers", GetType().Name, JSON.JsonEncode(requestHashtable));
+        }
+
+        private void FuzzyAdKatsUserSearch(string soldierName)
+        {
+            var requestHashtable = new Hashtable {
+                        {"caller_identity", GetType().Name},
+                        {"response_class", GetType().Name},
+                        {"response_method", "HandleFuzzyAdKatsUserSearch"},
+                        {"response_requested", true},
+                        {"target_name", soldierName},
+                        {"source_name", GetType().Name},
+                        {"user_subset", "all"},
+                    };
+
+            ExecuteCommand("procon.protected.plugins.call", "AdKats", "FetchAuthorizedSoldiers", GetType().Name, JSON.JsonEncode(requestHashtable));
+        }
+
+        public void HandleAdKatsAdminResponse(params string[] response)
+        {
+            if (response.Length != 2)
+                return;
+
+            var values = (Hashtable)JSON.JsonDecode(response[1]);
+
+            if (values["response_type"] as string != "FetchAuthorizedSoldiers")
+                return;
+
+            var val = values["response_value"] as string;
+
+            if (string.IsNullOrEmpty(val))
+                return;
+
+            string[] ads = CPluginVariable.DecodeStringArray(val);
+
+            _admins.Clear();
+            foreach (var admin in ads)
+                _admins.Add(admin);
+        }
+
+        public void HandleFuzzyAdKatsUserSearch(params string[] response)
+        {
+            if (response.Length != 2)
+                return;
+
+            var values = (Hashtable)JSON.JsonDecode(response[1]);
+
+            if (values["response_type"] as string != "FetchAuthorizedSoldiers")
+                return;
+
+            var val = values["response_value"] as string;
+
+            if (string.IsNullOrEmpty(val))
+                return;
+
+            string[] ads = CPluginVariable.DecodeStringArray(val);
+
+            _fuzzy.Clear();
+            foreach (var fuzzy in ads)
+                _fuzzy.Add(fuzzy);
+        }
+
+        private bool IsAdmin(string soldierName)
+        {
+            bool t = _admins.Contains(soldierName);
+            RefreshAdKatsAdmins();
+            return t;
+        }
+
+        private void Forgive(string id, string adminId)
+        {
+            Connect();
+            Console($@"Forgiving #{id} ({adminId})");
+            string query = $@"update tbl_language_infractions set forgiven = true, forgiven_on = current_timestamp, forgiven_by = {adminId} where id = {id};";
+            MySqlCommand _command = new MySqlCommand(query, _connection);
+            _command.ExecuteNonQuery();
+
+            Disconnect();
         }
 
         /// <summary>
@@ -498,6 +680,21 @@ namespace PRoConEvents
             {
                 return "Mandatory data was not provided";
             }
+        }
+    }
+}
+
+namespace Extensions
+{
+    public static class StringExtensions
+    {
+        public static bool StartsWithAny(this string s, string[] needles)
+        {
+            foreach (var needle in needles)
+            {
+                if (s.StartsWith(needle)) return true;
+            }
+            return false;
         }
     }
 }
