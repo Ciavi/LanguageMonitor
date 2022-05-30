@@ -69,7 +69,7 @@ namespace PRoConEvents
 
         protected bool _enabled = false;
         protected long _timespan = 604800;
-        protected Dictionary<uint, Action> _actionSequence;
+        protected Dictionary<uint, Tuple<ActionType, long>> _actionSequence;
         protected List<Tuple<string, Queue<Action>>> _queuedActions;
 
         protected MySqlConnection _connection;
@@ -222,48 +222,32 @@ namespace PRoConEvents
             _excludeadmins = enumBoolYesNo.Yes;
             _players = new List<CPlayerInfo>();
 
-            _actionSequence = new Dictionary<uint, Action>()
+            _actionSequence = new Dictionary<uint, Tuple<ActionType, long>>()
             {
                 {   
                     0,
-                    new Action
-                    {
-                        Type = ActionType.Mute,
-                        Duration = 300,
-                    }
+                    new Tuple<ActionType, long>(ActionType.Mute, 300)
                 },
                 {
                     1,
-                    new Action
-                    {
-                        Type = ActionType.Kill,
-                        Duration = -1,
-                    }
+                    new Tuple<ActionType, long>(ActionType.Mute, 21600)
                 },
                 {
                     5,
-                    new Action
-                    {
-                        Type = ActionType.Kick,
-                        Duration = -1,
-                    }
+                    new Tuple<ActionType, long>(ActionType.Kill, -1)
                 },
                 {
                     7,
-                    new Action
-                    {
-                        Type = ActionType.Ban,
-                        Duration = 7200,
-                    }
+                    new Tuple<ActionType, long>(ActionType.Kick, -1)
                 },
                 {
                     8,
-                    new Action
-                    {
-                        Type = ActionType.Ban,
-                        Duration = 14 * 86400,
-                    }
+                    new Tuple<ActionType, long>(ActionType.Ban, 2 * 86400)
                 },
+                {
+                    10,
+                    new Tuple<ActionType, long>(ActionType.Ban, -1)
+                }
             };
         }
 
@@ -508,10 +492,13 @@ namespace PRoConEvents
             }).ToArray()[0].ToString();
         }
 
-        private Action GetNextAction(string soldierName, string adminName, string reason)
+        private Action GetNextAction(string soldierName, string adminName)
         {
 
-            return new Action { };
+            return new Action {
+                Issuer = adminName,
+                Target = soldierName,
+            };
         }
 
         /// <summary>
@@ -563,6 +550,19 @@ namespace PRoConEvents
             if (message.StartsWith("lforgive"))
             {
                 message = message.Substring(8).Trim();
+
+                var command = message.Split(new char[] { ' ' }, 2);
+                string target = command[0];
+                string reason = command[1];
+
+                if (!IsAvailable(target))
+                {
+                    Enqueue(new Action
+                    {
+                        Type = ActionType.Forgive,
+
+                    });
+                }
             }
             //!lpunish <name> <reason>
             else if (message.StartsWith("lpunish"))
@@ -575,7 +575,7 @@ namespace PRoConEvents
 
                 if (!IsAvailable(target))
                 {
-                    Enqueue(GetNextAction(target, speaker, reason));
+                    Enqueue(GetNextAction(target, speaker));
 
                     FuzzyAdKatsUserSearch(target);
                 }
