@@ -33,6 +33,7 @@ namespace PRoConEvents
             Kill,
             Kick,
             Ban,
+            Command,
         }
 
         public struct Action
@@ -42,6 +43,11 @@ namespace PRoConEvents
             public string Target;
             public string Message;
             public long Duration;
+
+            public override string ToString()
+            {
+                return $"Action: \n{{\n\ttype: {Type},\n\tissuer: {Issuer},\n\ttarget: {Target},\n\tmessage: {Message}\n\tduration: {Duration},\n}}";
+            }
         }
 
         public struct Rule
@@ -50,7 +56,7 @@ namespace PRoConEvents
             public string Regex;
         }
 
-        protected delegate void FuzzySearchOver(string found);
+        protected delegate void FuzzySearchOver(string found, string requester);
         protected event FuzzySearchOver FuzzySearchCompleted;
 
         #region Variables
@@ -61,11 +67,12 @@ namespace PRoConEvents
         protected string _password;
         protected List<string> _regex;
         protected List<string> _factors;
-        protected List<string> _cmdchars;
+        protected List<string> _cmdChars;
         protected List<string> _admins;
         protected List<string> _fuzzy;
+        protected Queue<string> _fuzzyRequesters;
         protected List<Rule> _rules;
-        protected enumBoolYesNo _excludeadmins;
+        protected enumBoolYesNo _excludeAdmins;
 
         protected bool _enabled = false;
         protected long _timespan = 604800;
@@ -88,8 +95,8 @@ namespace PRoConEvents
                 {
                     new CPluginVariable("Monitor|Regular Expressions", typeof(string[]), _regex.ToArray()),
                     new CPluginVariable("Monitor|Factors", typeof(string[]), _factors.ToArray()),
-                    new CPluginVariable("Monitor|Exclude Administrators", typeof(enumBoolYesNo), _excludeadmins),
-                    new CPluginVariable("Monitor|Command Flags", typeof(string[]), _cmdchars.ToArray()),
+                    new CPluginVariable("Monitor|Exclude Administrators", typeof(enumBoolYesNo), _excludeAdmins),
+                    new CPluginVariable("Monitor|Command Flags", typeof(string[]), _cmdChars.ToArray()),
                     new CPluginVariable("Database|Hostname", typeof(string), _hostname),
                     new CPluginVariable("Database|Port", typeof(int), _port),
                     new CPluginVariable("Database|Schema", typeof(string), _schema),
@@ -124,8 +131,8 @@ namespace PRoConEvents
                         pluginVariables.Add(new CPluginVariable("Database|Password", typeof(string), _password));
                         pluginVariables.Add(new CPluginVariable("Monitor|Regular Expressions", typeof(string[]), _regex.ToArray()));
                         pluginVariables.Add(new CPluginVariable("Monitor|Factors", typeof(string[]), _factors.ToArray()));
-                        pluginVariables.Add(new CPluginVariable("Monitor|Exclude Administrators", typeof(enumBoolYesNo), _excludeadmins));
-                        pluginVariables.Add(new CPluginVariable("Monitor|Command Flags", typeof(string[]), _cmdchars.ToArray()));
+                        pluginVariables.Add(new CPluginVariable("Monitor|Exclude Administrators", typeof(enumBoolYesNo), _excludeAdmins));
+                        pluginVariables.Add(new CPluginVariable("Monitor|Command Flags", typeof(string[]), _cmdChars.ToArray()));
                     }
 
                     return pluginVariables;
@@ -151,10 +158,10 @@ namespace PRoConEvents
                     BuildRules();
                     break;
                 case "Exclude Administrators":
-                    _excludeadmins = (strValue == enumBoolYesNo.Yes.ToString() ? enumBoolYesNo.Yes : enumBoolYesNo.No);
+                    _excludeAdmins = (strValue == enumBoolYesNo.Yes.ToString() ? enumBoolYesNo.Yes : enumBoolYesNo.No);
                     break;
                 case "Command Flags":
-                    _cmdchars = new List<string>(CPluginVariable.DecodeStringArray(strValue));
+                    _cmdChars = new List<string>(CPluginVariable.DecodeStringArray(strValue));
                     break;
                 case "Hostname":
                     _hostname = strValue;
@@ -215,11 +222,12 @@ namespace PRoConEvents
             _password = string.Empty;
             _regex = new List<string>();
             _factors = new List<string>();
-            _cmdchars = new List<string>() { "!", "@", "/" };
+            _cmdChars = new List<string>() { "!", "@", "/" };
             _admins = new List<string>();
             _fuzzy = new List<string>();
+            _fuzzyRequesters = new Queue<string>();
             _rules = new List<Rule>();
-            _excludeadmins = enumBoolYesNo.Yes;
+            _excludeAdmins = enumBoolYesNo.Yes;
             _players = new List<CPlayerInfo>();
 
             _actionSequence = new Dictionary<uint, Tuple<ActionType, long>>()
@@ -368,6 +376,9 @@ namespace PRoConEvents
             {
                 RefreshAdKatsAdmins();
                 InitializeSchema();
+
+                AssignEventsHandlers();
+
                 Console("^2Enabled.");
             }
             catch (DataNotProvidedException m)
@@ -411,7 +422,7 @@ namespace PRoConEvents
             {
                 try
                 {
-                    if (message.StartsWithAny(_cmdchars.ToArray()))
+                    if (message.StartsWithAny(_cmdChars.ToArray()))
                         LanguageCommand(speaker, message);
                     else if (Evaluate(message))
                         PunishPlayer(speaker, message);
@@ -432,6 +443,16 @@ namespace PRoConEvents
         private void Console(string message)
         {
             ExecuteCommand("procon.protected.pluginconsole.write", $@"[Language Monitor] {message}");
+        }
+
+        private void AssignEventsHandlers()
+        {
+            FuzzySearchCompleted += LanguageMonitor_FuzzySearchCompleted;
+        }
+
+        private void LanguageMonitor_FuzzySearchCompleted(string found, string requester)
+        {
+            ExecuteCommand("procon.protected.send", "admin.playerSay", requester, $"Did you mean {found}? (!lyes/!lno)");
         }
 
         /// <summary>
@@ -494,7 +515,6 @@ namespace PRoConEvents
 
         private Action GetNextAction(string soldierName, string adminName)
         {
-
             return new Action {
                 Issuer = adminName,
                 Target = soldierName,
@@ -560,8 +580,13 @@ namespace PRoConEvents
                     Enqueue(new Action
                     {
                         Type = ActionType.Forgive,
-
+                        Issuer = speaker,
+                        Target = target,
+                        Message = reason,
+                        Duration = -1,
                     });
+
+                    FuzzyAdKatsUserSearch(target, speaker);
                 }
             }
             //!lpunish <name> <reason>
@@ -577,14 +602,14 @@ namespace PRoConEvents
                 {
                     Enqueue(GetNextAction(target, speaker));
 
-                    FuzzyAdKatsUserSearch(target);
+                    FuzzyAdKatsUserSearch(target, speaker);
                 }
             }
-            else if (message.StartsWith("yes"))
+            else if (message.StartsWith("lyes"))
             {
                 Execute(Dequeue(speaker));
             }
-            else if (message.StartsWith("no"))
+            else if (message.StartsWith("lno"))
             {
                 Dequeue(speaker);
             }
@@ -610,7 +635,7 @@ namespace PRoConEvents
 
         private void Execute(Action action)
         {
-
+            Console($"{action}");
         }
 
         #region AdKats
@@ -638,8 +663,10 @@ namespace PRoConEvents
         /// <param name="soldierName">
         /// The player's name.
         /// </param>
-        private void FuzzyAdKatsUserSearch(string soldierName)
+        private void FuzzyAdKatsUserSearch(string soldierName, string adminName)
         {
+            _fuzzyRequesters.Enqueue(adminName);
+
             var requestHashtable = new Hashtable {
                         {"caller_identity", GetType().Name},
                         {"response_class", GetType().Name},
@@ -708,7 +735,7 @@ namespace PRoConEvents
             foreach (var fuzzy in ads)
                 _fuzzy.Add(fuzzy);
 
-            FuzzySearchCompleted?.Invoke(_fuzzy.FirstOrDefault());
+            FuzzySearchCompleted?.Invoke(_fuzzy.FirstOrDefault(), _fuzzyRequesters.Dequeue());
         }
         #endregion
 
